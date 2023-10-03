@@ -5,23 +5,27 @@ import json
 import requests
 
 
-class VKAPIClient:
-    VK_API_BASE_URL = 'https://api.vk.com/method'
-    YADISK_API_BASE_URL = 'https://cloud-api.yandex.net'
-    url_for_get_link_to_download = f'{YADISK_API_BASE_URL}/v1/disk/resources/download'
-    url_for_get_link_to_upload = f'{YADISK_API_BASE_URL}/v1/disk/resources/upload'
+class APIClient:
+    def __init__(self, token):
+        self.token = token
+        self.other = None
 
-    def __init__(self, vk_token, user_id, yadisk_token):
-        self.vk_token = vk_token
+    def connect(self, other, ans=True):
+        self.other = other
+        if ans:
+            other.connect(self, False)
+
+
+class VKAPIClient(APIClient):
+    base_url = 'https://api.vk.com/method'
+
+    def __init__(self, vk_token, user_id):
+        super().__init__(vk_token)
         self.user_id = user_id
-        self.yadisk_token = yadisk_token
-        self.headers = {
-            'Authorization': self.yadisk_token
-        }
 
     def get_common_params(self):
         return {
-            'access_token': self.vk_token,
+            'access_token': self.token,
             'v': '5.131',
             'user_id': self.user_id,
             'album_id': 'profile',
@@ -30,7 +34,7 @@ class VKAPIClient:
         }
 
     def get_photos(self):
-        response = requests.get(f'{self.VK_API_BASE_URL}/photos.get?', params=self.get_common_params())
+        response = requests.get(f'{self.base_url}/photos.get?', params=self.get_common_params())
         return response.json().get('response', {}).get('items', {})
 
     def info_photos(self):
@@ -46,11 +50,25 @@ class VKAPIClient:
                  } for photo in photos]
         return info
 
+    def backup(self, count_photo=5):
+        self.other.backup(count_photo, self.info_photos())
+
+
+class YADiskAPIClient(APIClient):
+    base_url = 'https://cloud-api.yandex.net'
+    url_for_get_link = f'{base_url}/v1/disk/resources'
+
+    def __init__(self, yadisk_token):
+        super().__init__(yadisk_token)
+        self.headers = {
+            'Authorization': self.token
+        }
+
     def get_info(self):
         params = {
             'path': f'VK_Photos/info.json'
         }
-        response = requests.get(self.url_for_get_link_to_download,
+        response = requests.get(f'{self.url_for_get_link}/download',
                                 headers=self.headers,
                                 params=params)
         if 200 <= response.status_code <= 300:
@@ -58,7 +76,7 @@ class VKAPIClient:
             info = requests.get(url_download,
                                 headers=self.headers,
                                 params=params).json()
-            requests.delete(f'{self.YADISK_API_BASE_URL}/v1/disk/resources',
+            requests.delete(f'{self.base_url}/v1/disk/resources',
                             headers=self.headers,
                             params=params)
         else:
@@ -75,7 +93,7 @@ class VKAPIClient:
                 if photo not in info:
                     info.append(photo)
             json.dump(info, file, indent=1)
-        response = requests.get(self.url_for_get_link_to_upload,
+        response = requests.get(f'{self.url_for_get_link}/upload',
                                 headers=self.headers,
                                 params=params)
         url_upload = response.json().get('href', 'https://disk.yandex.ru')
@@ -83,14 +101,14 @@ class VKAPIClient:
             requests.put(url_upload, files={"file": file})
         remove('info.json')
 
-    def backup(self, count_photos=5):
+    def backup(self, count_photos=5, info_photos=''):
         params = {
             'path': 'VK_Photos'
         }
-        requests.put(f'{self.YADISK_API_BASE_URL}/v1/disk/resources',
+        requests.put(f'{self.base_url}/v1/disk/resources',
                      headers=self.headers,
                      params=params)
-        photos = self.info_photos()[:count_photos]
+        photos = info_photos[:count_photos]
         for _, photo in zip(tqdm(photos), photos):
             photo_content = requests.get(photo.get('vk_photo_url'))
             with open(photo.get('file_name', ''), 'wb') as file:
@@ -98,7 +116,7 @@ class VKAPIClient:
             params = {
                 'path': f'VK_Photos/{photo.get("file_name", "")}'
             }
-            response = requests.get(self.url_for_get_link_to_upload,
+            response = requests.get(f'{self.url_for_get_link}/upload',
                                     headers=self.headers,
                                     params=params)
             url_upload = response.json().get('href', 'https://disk.yandex.ru')
@@ -121,6 +139,6 @@ if __name__ == '__main__':
     print('Получи VK токен здесь:', oauth_url)
     print('Получи ЯДиск токен здесь:', 'https://yandex.ru/dev/disk/poligon/')
     vk_client = VKAPIClient(input('VK токен: '),
-                            int(input('VK ID: ')),
-                            f'OAuth {input("ЯДиск токен: ")}')
-    vk_client.backup(int(input('Колличество фотографий: ')))
+                            int(input('VK ID: ')))
+    yadisk_client = YADiskAPIClient(f'OAuth {input("ЯДиск токен: ")}')
+    yadisk_client.backup(int(input('Колличество фотографий: ')))
