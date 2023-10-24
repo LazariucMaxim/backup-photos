@@ -35,28 +35,31 @@ class VKAPIClient(APIClient):
 
     def get_photos(self):
         response = requests.get(f'{self.base_url}/photos.get?', params=self.get_common_params())
-        return response.json().get('response', {}).get('items', {})
+        if 200 <= response.status_code < 300:
+            return False, response.json().get('response', {}).get('items', {})
+        else:
+            print('Повторите попытку позже')
+        return True, None
 
     def info_photos(self):
-        photos = self.get_photos()
-        info = [{'file_name': f'{photo.get("likes", {}).get("count", 0)}_{photo.get("date", 0)}.jpg',
-                 'size': 'z',
-                 'vk_photo_url': list(
-                        filter(
-                             lambda x: x.get('type', '') == 'z',
-                             photo.get('sizes', [])
-                        )
-                    )[0].get('url', '')
-                 } for photo in photos]
-        return info
+        error, photos = self.get_photos()
+        info = None
+        if not error:
+            info = [{'file_name': f'{photo.get("likes", {}).get("count", 0)}_{photo.get("date", 0)}.jpg',
+                     'size': photo[-1].get('type', ''),
+                     'vk_photo_url': photo[-1].get('url', '')
+                     } for photo in photos]
+        return error, info
 
     def backup(self, count_photo=5):
-        self.other.backup(count_photo, self.info_photos())
+        error, info_photos = self.info_photos()
+        if not error:
+            self.other.backup(count_photo, info_photos)
 
 
 class YADiskAPIClient(APIClient):
     base_url = 'https://cloud-api.yandex.net'
-    url_for_get_link = f'{base_url}/v1/disk/resources'
+    url_for_get_link = f'{base_url}/v1/disk/resources'  # ссылка для получения ссылки для загрузки/удаления файла
 
     def __init__(self, yadisk_token):
         super().__init__(yadisk_token)
@@ -68,47 +71,69 @@ class YADiskAPIClient(APIClient):
         params = {
             'path': f'VK_Photos/info.json'
         }
-        response = requests.get(f'{self.url_for_get_link}/download',
-                                headers=self.headers,
-                                params=params)
-        if 200 <= response.status_code <= 300:
-            url_download = response.json().get('href', 'https://disk.yandex.ru')
-            info = requests.get(url_download,
-                                headers=self.headers,
-                                params=params).json()
-            requests.delete(f'{self.base_url}/v1/disk/resources',
-                            headers=self.headers,
-                            params=params)
-        else:
+        info = None
+        error = False
+        response_for_download = requests.get(f'{self.url_for_get_link}/download',
+                                             headers=self.headers,
+                                             params=params)
+        if 200 <= response_for_download.status_code < 300:
+            url_download = response_for_download.json().get('href', 'https://disk.yandex.ru')
+            download_response = requests.get(url_download,
+                                             headers=self.headers,
+                                             params=params)
+            if download_response.status_code == 200:
+                info = download_response.json()
+            else:
+                print('Повторите попытку позже')
+                error = True
+        elif response_for_download.status_code == 404:
+            # 404: "Файл не найден"(по причине отсутствия), это нас устраивает
             info = []
-        return info
+        else:
+            print(f'Ядиск: {response_for_download.json().get("message", "")}')
+            error = True
+        return error, info
 
     def update_info(self, new_info):
-        info = self.get_info()
+        error, info = self.get_info()
         params = {
             'path': f'VK_Photos/info.json'
         }
-        with open('info.json', 'w') as file:
+        if not error:
             for photo in new_info:
                 if photo not in info:
                     info.append(photo)
+        with open('info.json', 'w') as file:
             json.dump(info, file, indent=1)
-        response = requests.get(f'{self.url_for_get_link}/upload',
-                                headers=self.headers,
-                                params=params)
-        url_upload = response.json().get('href', 'https://disk.yandex.ru')
-        with open('info.json') as file:
-            requests.put(url_upload, files={"file": file})
-        remove('info.json')
+        responce_for_delete = requests.delete(f'{self.base_url}/v1/disk/resources',
+                                              headers=self.headers,
+                                              params=params)
+        if 200 <= responce_for_delete.status_code <= 300 or responce_for_delete.status_code == 404:
+            # 404: "Файл не найден"(по причине отсутствия), это нас устраивает
+            response_for_upload = requests.get(f'{self.url_for_get_link}/upload',
+                                               headers=self.headers,
+                                               params=params)
+            if 200 <= response_for_upload.status_code < 300:
+                url_upload = response_for_upload.json().get('href', 'https://disk.yandex.ru')
+                with open('info.json') as file:
+                    requests.put(url_upload, files={"file": file})
+                remove('info.json')
+            else:
+                print("Данные о фотографиях не были обновленны. Повторите попытку позже для всех фотографий")
+        else:
+            print("Данные о фотографиях не были обновленны. Повторите попытку позже")
 
-    def backup(self, count_photos=5, info_photos=''):
+    def backup(self, count_photos=-1, info_photos=''):
         params = {
             'path': 'VK_Photos'
         }
         requests.put(f'{self.base_url}/v1/disk/resources',
                      headers=self.headers,
                      params=params)
-        photos = info_photos[:count_photos]
+        if count_photos > len(info_photos) or count_photos == -1:
+            photos = info_photos[:]
+        else:
+            photos = info_photos[:count_photos]
         for _, photo in zip(tqdm(photos), photos):
             photo_content = requests.get(photo.get('vk_photo_url'))
             with open(photo.get('file_name', ''), 'wb') as file:
@@ -128,7 +153,7 @@ class YADiskAPIClient(APIClient):
 
 if __name__ == '__main__':
     APP_ID = '51759248'
-    base_url_for_vk_token = 'http://oauth.vk.com/authorize'
+    base_url_for_vk_token = 'https://oauth.vk.com/authorize'
     params_for_vk_token = {
         'client_id': APP_ID,
         'display': 'page',
@@ -141,4 +166,5 @@ if __name__ == '__main__':
     vk_client = VKAPIClient(input('VK токен: '),
                             int(input('VK ID: ')))
     yadisk_client = YADiskAPIClient(f'OAuth {input("ЯДиск токен: ")}')
-    yadisk_client.backup(int(input('Колличество фотографий: ')))
+    vk_client.connect(yadisk_client)
+    vk_client.backup(int(input('Колличество фотографий (-1 = все фотографии): ')))
