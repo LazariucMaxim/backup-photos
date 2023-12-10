@@ -36,6 +36,9 @@ class VKAPIClient(APIClient):
     def get_photos(self):
         response = requests.get(f'{self.base_url}/photos.get?', params=self.get_common_params())
         if 200 <= response.status_code < 300:
+            if "error" in response.json():
+                print(f'VK:\n   {response.json().get("error", {}).get("error_msg", "Повторите попытку позже")}')
+                return True, None
             return False, response.json().get('response', {}).get('items', {})
         else:
             print('Повторите попытку позже')
@@ -46,8 +49,8 @@ class VKAPIClient(APIClient):
         info = None
         if not error:
             info = [{'file_name': f'{photo.get("likes", {}).get("count", 0)}_{photo.get("date", 0)}.jpg',
-                     'size': photo[-1].get('type', ''),
-                     'vk_photo_url': photo[-1].get('url', '')
+                     'size': sorted(photo.get('sizes', []), key=lambda x: x.get('width', 0))[-1].get('type', ''),
+                     'vk_photo_url': sorted(photo.get('sizes', []), key=lambda x: x.get('width', 0))[-1].get('url', '')
                      } for photo in photos]
         return error, info
 
@@ -84,20 +87,20 @@ class YADiskAPIClient(APIClient):
             if download_response.status_code == 200:
                 info = download_response.json()
             else:
-                print('Повторите попытку позже')
+                print(f'Ядиск:\n    {download_response.json().get("message", "Повторите попытку позже")}')
                 error = True
         elif response_for_download.status_code == 404:
             # 404: "Файл не найден"(по причине отсутствия), это нас устраивает
             info = []
         else:
-            print(f'Ядиск: {response_for_download.json().get("message", "")}')
+            print(f'Ядиск:\n    {response_for_download.json().get("message", "Повторите попытку позже")}')
             error = True
         return error, info
 
     def update_info(self, new_info):
         error, info = self.get_info()
         params = {
-            'path': f'VK_Photos/info.json'
+            'path': 'VK_Photos/info.json'
         }
         if not error:
             for photo in new_info:
@@ -119,36 +122,48 @@ class YADiskAPIClient(APIClient):
                     requests.put(url_upload, files={"file": file})
                 remove('info.json')
             else:
-                print("Данные о фотографиях не были обновленны. Повторите попытку позже для всех фотографий")
+                print('Данные о фотографиях не были обновленны. Повторите попытку позже для всех фотографий')
         else:
-            print("Данные о фотографиях не были обновленны. Повторите попытку позже")
+            print('Данные о фотографиях не были обновленны. Повторите попытку позже')
 
-    def backup(self, count_photos=-1, info_photos=''):
+    def backup(self, count_photos=5, info_photos=''):
         params = {
             'path': 'VK_Photos'
         }
-        requests.put(f'{self.base_url}/v1/disk/resources',
-                     headers=self.headers,
-                     params=params)
-        if count_photos > len(info_photos) or count_photos == -1:
-            photos = info_photos[:]
+        create_folder_response = requests.put(f'{self.base_url}/v1/disk/resources',
+                                              headers=self.headers,
+                                              params=params)
+        if 200 <= create_folder_response.status_code < 300 or create_folder_response.status_code == 409:
+            # 409: "Файл уже существует", это нас устраивает
+            if count_photos > len(info_photos) or count_photos < 0:
+                photos = info_photos[:]
+            else:
+                photos = info_photos[:count_photos]
+            for _, n, photo in zip(tqdm(photos), range(1, len(photos)+1), photos):
+                photo_content = requests.get(photo.get('vk_photo_url'))
+                with open(photo.get('file_name', ''), 'wb') as file:
+                    file.write(photo_content.content)
+                params = {
+                    'path': f'VK_Photos/{photo.get("file_name", "")}'
+                }
+                response = requests.get(f'{self.url_for_get_link}/upload',
+                                        headers=self.headers,
+                                        params=params)
+                if not (200 <= response.status_code < 300 or response.status_code == 409):
+                    # 409: "Файл уже существует", это нас устраивает
+                    print(f'Ядиск: (фотография {n})\n    {response.json().get("message", "Повторите попытку позже")}')
+                    return
+                url_upload = response.json().get('href', 'https://disk.yandex.ru')
+                with open(photo.get('file_name', ''), 'rb') as file:
+                    requests.put(url_upload, files={"file": file})
+                remove(photo.get('file_name', ''))
+                if not (200 <= response.status_code < 300 or response.status_code == 409):
+                    # 409: "Файл уже существует", это нас устраивает
+                    print(f'Ядиск: (фотография {n})\n    {response.json().get("message", "Повторите попытку позже")}')
+                    return
+            self.update_info(photos)
         else:
-            photos = info_photos[:count_photos]
-        for _, photo in zip(tqdm(photos), photos):
-            photo_content = requests.get(photo.get('vk_photo_url'))
-            with open(photo.get('file_name', ''), 'wb') as file:
-                file.write(photo_content.content)
-            params = {
-                'path': f'VK_Photos/{photo.get("file_name", "")}'
-            }
-            response = requests.get(f'{self.url_for_get_link}/upload',
-                                    headers=self.headers,
-                                    params=params)
-            url_upload = response.json().get('href', 'https://disk.yandex.ru')
-            with open(photo.get('file_name', ''), 'rb') as file:
-                requests.put(url_upload, files={"file": file})
-            remove(photo.get('file_name', ''))
-        self.update_info(photos)
+            print(f'Ядиск:\n    {create_folder_response.json().get("message", "Повторите попытку позже")}')
 
 
 if __name__ == '__main__':
